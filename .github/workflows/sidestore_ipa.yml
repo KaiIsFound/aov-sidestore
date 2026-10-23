@@ -1,15 +1,10 @@
 # File: .github/workflows/sidestore_ipa.yml
-# Chức năng: Tự động biên dịch Hack + Tự động ghép vào IPA Liên Quân gốc -> Xuất ra 1 file .ipa duy nhất cho SideStore
+# Chức năng: Tự động kéo IPA gốc từ Google Drive, tiêm OllieAOV.dylib và xuất file cho SideStore
 
-name: Build Full IPA For SideStore
+name: Build Full IPA For SideStore from Drive
 
 on:
   workflow_dispatch:
-    inputs:
-      ipa_url:
-        description: 'Dán link tải trực tiếp file IPA Liên Quân gốc (hoặc để trống nếu đã up file GarenaAOV.ipa lên kho)'
-        required: false
-        default: ''
 
 jobs:
   pack-ipa-for-sidestore:
@@ -19,9 +14,10 @@ jobs:
       - name: 1. Nạp dữ liệu từ kho chứa
         uses: actions/checkout@v4
 
-      - name: 2. Cài đặt bộ công cụ tiêm Mach-O (insert_dylib & ldid)
+      - name: 2. Cài đặt công cụ (ldid, insert_dylib & gdown)
         run: |
-          brew install ldid wget
+          brew install ldid python3
+          pip3 install gdown
           git clone https://github.com/Tyilo/insert_dylib.git
           clang insert_dylib/insert_dylib/main.c -o /usr/local/bin/insert_dylib -framework Foundation
 
@@ -30,10 +26,9 @@ jobs:
           mkdir -p include libs imgui
           git clone --depth 1 https://github.com/ocornut/imgui.git imgui_src
           cp imgui_src/*.h imgui_src/*.cpp imgui_src/backends/imgui_impl_metal.* imgui/
-          # Tạo header giả lập cho Dobby nếu dùng dynamic symbol lookup
           echo 'extern "C" int DobbyHook(void *address, void *fake_func, void **out_origin_func);' > include/dobby.h
 
-      - name: 4. Biên dịch mã nguồn OllieAOV.mm thành OllieAOV.dylib
+      - name: 4. Biên dịch OllieAOV.mm thành OllieAOV.dylib
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           CLANG_BIN=$(xcrun --sdk iphoneos --find clang++)
@@ -50,45 +45,33 @@ jobs:
             
           ldid -S OllieAOV.dylib
 
-      - name: 5. Tải IPA Liên Quân gốc và nhét thẳng Hack vào trong IPA
+      - name: 5. Tải file Garena IPA từ Google Drive của bạn
         run: |
-          if [ -n "${{ github.event.inputs.ipa_url }}" ]; then
-            wget -O GarenaAOV.ipa "${{ github.event.inputs.ipa_url }}"
-          fi
+          # ID file LienQuan-TIMO-trial-01-resign.ipa trong kho Drive của bạn
+          gdown "16QXGnUWGawWEnEcD01Vc-Rljql3ZfJSY" -O GarenaAOV.ipa
 
-          if [ ! -f "GarenaAOV.ipa" ]; then
-            echo "Chưa có GarenaAOV.ipa -> Tạo gói IPA khung chứa sẵn Dylib..."
-            mkdir -p build_ipa/Payload/ArenaOfValor.app/Frameworks
-            cp OllieAOV.dylib build_ipa/Payload/ArenaOfValor.app/Frameworks/
-            cd build_ipa && zip -qr ../Ollie_AOV_SideStore_Ready.ipa Payload && cd ..
-            exit 0
-          fi
-
+      - name: 6. Tiêm Hack vào IPA và xuất bản cho SideStore
+        run: |
           mkdir -p build_ipa
           unzip -q GarenaAOV.ipa -d build_ipa
           APP_DIR=$(find build_ipa/Payload -name "*.app" -type d | head -n 1)
           mkdir -p "$APP_DIR/Frameworks"
 
-          # Copy thư viện hack vào thư mục Frameworks của game
           cp OllieAOV.dylib "$APP_DIR/Frameworks/"
 
-          # Tìm tên file thực thi chính (CFBundleExecutable) trong Info.plist
           EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
 
-          # Đổi nhẹ Bundle ID và tắt giới hạn chia sẻ file để SideStore ký không bị lỗi
           /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.garena.game.kgvn.sidestore" "$APP_DIR/Info.plist" || true
           /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$APP_DIR/Info.plist" || true
 
-          # Tiêm lệnh nạp OllieAOV.dylib trực tiếp vào Binary của game
           insert_dylib --all-yes --inplace "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
           ldid -S "$APP_DIR/$EXEC_NAME"
 
-          # Nén lại thành 1 file .ipa hoàn chỉnh duy nhất dành cho SideStore
           cd build_ipa
           zip -qr ../Ollie_AOV_SideStore_Ready.ipa Payload
           cd ..
 
-      - name: 6. Xuất file .ipa ra màn hình tải về
+      - name: 7. Xuất file IPA hoàn chỉnh
         uses: actions/upload-artifact@v4
         with:
           name: File-IPA-Cho-SideStore
