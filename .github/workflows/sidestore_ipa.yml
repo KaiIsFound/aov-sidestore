@@ -1,5 +1,5 @@
 # File: .github/workflows/sidestore_ipa.yml
-# Chức năng: Tự động kéo IPA gốc từ Google Drive, biên dịch OllieAOV.dylib và đóng gói hoàn chỉnh cho SideStore
+# Chức năng: Vượt cảnh báo file lớn Google Drive, chống lỗi Exit Code 9 của unzip, tự động đóng gói IPA cho SideStore
 
 name: Build Clean IPA For SideStore
 
@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       clean_ipa_url:
-        description: 'Dán link Chia Sẻ Google Drive của file ipa gốc vào đây'
+        description: 'Dán link Chia Sẻ Google Drive của file [decrypt.download] com.garena.game.kgvn-1.64.11768577.ipa vào đây'
         required: true
-        default: 'https://drive.google.com/file/d/1W_2TzbPm8Y3BscYf-5m5PwISDR0Z4koE/view?usp=drivesdk'
+        default: ''
 
 jobs:
   pack-ipa-for-sidestore:
@@ -19,7 +19,7 @@ jobs:
       - name: 1. Nạp dữ liệu từ kho chứa
         uses: actions/checkout@v4
 
-      - name: 2. Cài đặt các công cụ (ldid, insert_dylib & gdown)
+      - name: 2. Cài đặt công cụ (ldid, insert_dylib & gdown)
         run: |
           brew install ldid wget
           python3 -m pip install --upgrade pip --break-system-packages || true
@@ -66,25 +66,33 @@ jobs:
           ldid -S OllieAOV.dylib
           ls -lh OllieAOV.dylib
 
-      - name: 5. Tải IPA gốc từ Google Drive (Dùng ID trực tiếp)
+      - name: 5. Tải IPA gốc 209MB từ Google Drive (Vượt trang cảnh báo Virus)
         run: |
           RAW_URL="${{ github.event.inputs.clean_ipa_url }}"
-          echo "Đang lấy file từ liên kết: $RAW_URL"
+          echo "Đang xử lý đường dẫn: $RAW_URL"
           
-          FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*\/d\/\([a-zA-Z0-9_-]*\).*/\1/p')
-          if [ -z "$FILE_ID" ]; then
-            FILE_ID="$RAW_URL"
+          # Dùng gdown --fuzzy để tự bóc tách link chia sẻ Google Drive và vượt trang cảnh báo >100MB
+          python3 -m gdown --fuzzy "$RAW_URL" -O BaseGame.ipa || true
+          
+          # Kiểm tra nếu file tải về bị lỗi hoặc nhỏ hơn 10MB (tức là bị tải nhầm trang HTML lỗi phân quyền)
+          if [ ! -f "BaseGame.ipa" ] || [ $(stat -f%z "BaseGame.ipa") -lt 10000000 ]; then
+            echo "CẢNH BÁO: File trên Google Drive chưa bật quyền 'Bất kỳ ai có đường liên kết (Anyone with the link)'!"
+            echo "Tiến hành thử tải lại bằng curl bypass confirm..."
+            FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*\/d\/\([a-zA-Z0-9_-]*\).*/\1/p')
+            if [ -z "$FILE_ID" ]; then
+              FILE_ID="$RAW_URL"
+            fi
+            curl -L "https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t" -o BaseGame.ipa
           fi
           
-          echo "Mã File ID nhận diện: $FILE_ID"
-          
-          python3 -m gdown "https://drive.google.com/uc?id=${FILE_ID}&export=download" -O BaseGame.ipa --fuzzy
           ls -lh BaseGame.ipa
+          file BaseGame.ipa
 
-      - name: 6. Giải nén an toàn & Tiêm OllieAOV.dylib
+      - name: 6. Giải nén an toàn (Chống lỗi Exit Code 9) & Tiêm OllieAOV.dylib
         run: |
           mkdir -p build_ipa
           
+          # Kiểm tra chắc chắn BaseGame.ipa là file nén Zip/IPA thật trước khi giải nén
           if file BaseGame.ipa | grep -qE "Zip archive|IPA"; then
             echo "Xác nhận file IPA gốc hợp lệ! Đang giải nén..."
             unzip -q BaseGame.ipa -d build_ipa
@@ -97,12 +105,13 @@ jobs:
             /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.garena.game.kgvn.sidestore" "$APP_DIR/Info.plist" || true
             /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$APP_DIR/Info.plist" || true
             
+            # Xóa các PlugIns phụ để SideStore không bị báo lỗi giới hạn App Extensions
             rm -rf "$APP_DIR/PlugIns" "$APP_DIR/Watch" || true
             
             insert_dylib --all-yes --inplace "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
             ldid -S "$APP_DIR/$EXEC_NAME"
           else
-            echo "LỖI: File tải về không phải IPA hợp lệ!"
+            echo "LỖI: File tải về vẫn là trang web HTML do bạn chưa mở quyền chia sẻ công khai trên Google Drive!"
             head -n 20 BaseGame.ipa
             exit 1
           fi
