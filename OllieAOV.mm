@@ -27,7 +27,7 @@ void RenderOllieUI(CGSize screenSize, ImDrawList* drawList) {
         ImGui::Text("STATUS: CONNECTED (ARM64 NON-JB)");
         ImGui::Separator();
         
-        if (ImGui::BeginTabsBar ? ImGui::BeginTabBar("Tabs") : ImGui::BeginTabBar("Tabs")) {
+        if (ImGui::BeginTabBar("Tabs")) {
             if (ImGui::BeginTabItem("ESP & Map")) {
                 static bool espBox = true;
                 static bool espLine = true;
@@ -78,6 +78,11 @@ void RenderOllieUI(CGSize screenSize, ImDrawList* drawList) {
         ImGui_ImplMetal_Init(dev);
     }
     return self;
+}
+
+// Bổ sung phương thức bắt buộc của giao thức MTKViewDelegate
+- (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
+    // Xử lý thay đổi kích thước khung hình nếu cần
 }
 
 - (void)drawInMTKView:(MTKView *)view {
