@@ -1,0 +1,45 @@
+name: Validate Menu
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'fix/menu-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  menu:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile device library with the existing no-op hook stub
+        run: |
+          mkdir -p build
+          cat > build/dobby_stub.cpp <<'CPP'
+          extern "C" int DobbyHook(void *address, void *, void **original) {
+              if (original) *original = address;
+              return 0;
+          }
+          CPP
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang++ -arch arm64 -isysroot "$SDK_PATH" \
+            -miphoneos-version-min=13.0 -std=c++20 -O3 -dynamiclib \
+            -fobjc-arc -fvisibility=hidden -Wno-deprecated-declarations \
+            OllieAOV.mm OllieMenu.mm build/dobby_stub.cpp \
+            -framework Foundation -framework UIKit -framework Metal -framework MetalKit -framework CoreGraphics \
+            -install_name @executable_path/Frameworks/OllieAOV.dylib \
+            -o build/OllieAOV.dylib
+          xcrun vtool -show-build build/OllieAOV.dylib
+      - name: Exercise menu in iOS Simulator
+        run: bash tests/run-menu-smoke.sh
+      - name: Upload library and test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Menu-validation
+          path: |
+            build/OllieAOV.dylib
+            build/menu-smoke.log
