@@ -1,53 +1,35 @@
-# File: .github/workflows/sidestore_ipa.yml
-# Chức năng: Vượt cảnh báo file lớn Google Drive, chống lỗi Exit Code 9 của unzip, tự động đóng gói IPA cho SideStore
-
 name: Build Clean IPA For SideStore
 
 on:
   workflow_dispatch:
     inputs:
       clean_ipa_url:
-        description: 'Dán link Chia Sẻ Google Drive của file [decrypt.download] com.garena.game.kgvn-1.64.11768577.ipa vào đây'
+        description: 'Dán link Google Drive của file ipa gốc'
         required: true
-        default: ''
+        default: 'https://drive.google.com/file/d/1W_2TzbPm8Y3BscYf-5m5PwISDR0Z4koE/view?usp=drivesdk'
 
 jobs:
   pack-ipa-for-sidestore:
     runs-on: macos-14
 
     steps:
-      - name: 1. Nạp dữ liệu từ kho chứa
+      - name: 1. Nạp mã nguồn
         uses: actions/checkout@v4
 
-      - name: 2. Cài đặt công cụ (ldid, insert_dylib & gdown)
+      - name: 2. Cài đặt công cụ
         run: |
           brew install ldid wget
-          python3 -m pip install --upgrade pip --break-system-packages || true
-          python3 -m pip install --upgrade gdown --break-system-packages || pip3 install gdown
-          
+          pip3 install --upgrade gdown --break-system-packages || true
           git clone https://github.com/Tyilo/insert_dylib.git
           clang insert_dylib/insert_dylib/main.c -o /usr/local/bin/insert_dylib -framework Foundation
 
-      - name: 3. Tải ImGui Metal & Tạo Stub Dobby Hook
+      - name: 3. Tải ImGui Metal
         run: |
           mkdir -p include imgui
           git clone --depth 1 https://github.com/ocornut/imgui.git imgui_src
           cp imgui_src/*.h imgui_src/*.cpp imgui_src/backends/imgui_impl_metal.* imgui/
-          
-          cat << 'EOF' > include/dobby.h
-          #pragma once
-          extern "C" int DobbyHook(void *address, void *fake_func, void **out_origin_func);
-          EOF
-          
-          cat << 'EOF' > dobby_stub.cpp
-          #include <stdint.h>
-          extern "C" __attribute__((weak)) int DobbyHook(void *address, void *fake_func, void **out_origin_func) {
-              if (out_origin_func) *out_origin_func = address;
-              return 0;
-          }
-          EOF
 
-      - name: 4. Biên dịch OllieAOV.mm thành OllieAOV.dylib chuẩn ARM64
+      - name: 4. Biên dịch OllieAOV.dylib
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           CLANG_BIN=$(xcrun --sdk iphoneos --find clang++)
@@ -55,76 +37,41 @@ jobs:
           $CLANG_BIN -arch arm64 -isysroot "$SDK_PATH" \
             -std=c++20 -O3 -dynamiclib \
             -fobjc-arc -fvisibility=hidden \
-            -Wno-deprecated-declarations -Wno-unused-parameter \
+            -Wno-deprecated-declarations \
             -I./include -I./imgui \
-            OllieAOV.mm dobby_stub.cpp \
+            OllieAOV.mm \
             imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/imgui_impl_metal.mm \
             -framework Foundation -framework UIKit -framework Metal -framework MetalKit -framework CoreGraphics \
             -install_name @executable_path/Frameworks/OllieAOV.dylib \
             -o OllieAOV.dylib
             
           ldid -S OllieAOV.dylib
-          ls -lh OllieAOV.dylib
 
-      - name: 5. Tải IPA gốc 209MB từ Google Drive (Vượt trang cảnh báo Virus)
+      - name: 5. Tải file IPA Gốc từ Drive
         run: |
-          RAW_URL="${{ github.event.inputs.clean_ipa_url }}"
-          echo "Đang xử lý đường dẫn: $RAW_URL"
-          
-          # Dùng gdown --fuzzy để tự bóc tách link chia sẻ Google Drive và vượt trang cảnh báo >100MB
-          python3 -m gdown --fuzzy "$RAW_URL" -O BaseGame.ipa || true
-          
-          # Kiểm tra nếu file tải về bị lỗi hoặc nhỏ hơn 10MB (tức là bị tải nhầm trang HTML lỗi phân quyền)
-          if [ ! -f "BaseGame.ipa" ] || [ $(stat -f%z "BaseGame.ipa") -lt 10000000 ]; then
-            echo "CẢNH BÁO: File trên Google Drive chưa bật quyền 'Bất kỳ ai có đường liên kết (Anyone with the link)'!"
-            echo "Tiến hành thử tải lại bằng curl bypass confirm..."
-            FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*\/d\/\([a-zA-Z0-9_-]*\).*/\1/p')
-            if [ -z "$FILE_ID" ]; then
-              FILE_ID="$RAW_URL"
-            fi
-            curl -L "https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t" -o BaseGame.ipa
-          fi
-          
-          ls -lh BaseGame.ipa
-          file BaseGame.ipa
+          gdown --fuzzy "${{ github.event.inputs.clean_ipa_url }}" -O BaseGame.ipa
 
-      - name: 6. Giải nén an toàn (Chống lỗi Exit Code 9) & Tiêm OllieAOV.dylib
+      - name: 6. Giải nén, Tiêm Dylib và Đóng gói
         run: |
           mkdir -p build_ipa
+          unzip -q BaseGame.ipa -d build_ipa
+          APP_DIR=$(find build_ipa/Payload -name "*.app" -type d | head -n 1)
+          mkdir -p "$APP_DIR/Frameworks"
           
-          # Kiểm tra chắc chắn BaseGame.ipa là file nén Zip/IPA thật trước khi giải nén
-          if file BaseGame.ipa | grep -qE "Zip archive|IPA"; then
-            echo "Xác nhận file IPA gốc hợp lệ! Đang giải nén..."
-            unzip -q BaseGame.ipa -d build_ipa
-            APP_DIR=$(find build_ipa/Payload -name "*.app" -type d | head -n 1)
-            mkdir -p "$APP_DIR/Frameworks"
-            
-            cp OllieAOV.dylib "$APP_DIR/Frameworks/"
-            
-            EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
-            /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.garena.game.kgvn.sidestore" "$APP_DIR/Info.plist" || true
-            /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$APP_DIR/Info.plist" || true
-            
-            # Xóa các PlugIns phụ để SideStore không bị báo lỗi giới hạn App Extensions
-            rm -rf "$APP_DIR/PlugIns" "$APP_DIR/Watch" || true
-            
-            insert_dylib --all-yes --inplace "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
-            ldid -S "$APP_DIR/$EXEC_NAME"
-          else
-            echo "LỖI: File tải về vẫn là trang web HTML do bạn chưa mở quyền chia sẻ công khai trên Google Drive!"
-            head -n 20 BaseGame.ipa
-            exit 1
-          fi
+          cp OllieAOV.dylib "$APP_DIR/Frameworks/"
+          
+          EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.garena.game.kgvn.sidestore" "$APP_DIR/Info.plist" || true
+          
+          insert_dylib --all-yes --inplace "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
+          ldid -S "$APP_DIR/$EXEC_NAME"
           
           cd build_ipa
           zip -qr ../Ollie_AOV_SideStore_Ready.ipa Payload
           cd ..
-          ls -lh Ollie_AOV_SideStore_Ready.ipa
 
-      - name: 7. Xuất file IPA hoàn chỉnh cho SideStore
+      - name: 7. Xuất file IPA
         uses: actions/upload-artifact@v4
         with:
           name: File-IPA-Cho-SideStore
-          path: |
-            Ollie_AOV_SideStore_Ready.ipa
-            OllieAOV.dylib
+          path: Ollie_AOV_SideStore_Ready.ipa
