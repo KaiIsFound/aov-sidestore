@@ -52,14 +52,14 @@ jobs:
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           CLANG_BIN=$(xcrun --sdk iphoneos --find clang++)
           
-          $CLANG_BIN -arch arm64 -isysroot "$SDK_PATH" \
-            -std=c++20 -O3 -dynamiclib \
+          "$CLANG_BIN" -arch arm64 -isysroot "$SDK_PATH" \
+            -std=c++20 -O3 -dynamiclib -miphoneos-version-min=13.0 \
             -fobjc-arc -fvisibility=hidden \
             -Wno-deprecated-declarations -Wno-unused-parameter \
             -I./include -I./imgui \
             OllieAOV.mm dobby_stub.cpp \
             imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/imgui_impl_metal.mm \
-            -framework Foundation -framework UIKit -framework Metal -framework MetalKit -framework CoreGraphics \
+            -framework Foundation -framework UIKit -framework Metal -framework MetalKit -framework CoreGraphics -framework QuartzCore \
             -install_name @executable_path/Frameworks/OllieAOV.dylib \
             -o OllieAOV.dylib
             
@@ -67,8 +67,10 @@ jobs:
           ls -lh OllieAOV.dylib
 
       - name: 5. Tải IPA gốc 209MB từ Google Drive (Vượt trang cảnh báo Virus)
+        env:
+          CLEAN_IPA_URL: ${{ github.event.inputs.clean_ipa_url }}
         run: |
-          RAW_URL="${{ github.event.inputs.clean_ipa_url }}"
+          RAW_URL="$CLEAN_IPA_URL"
           echo "Đang xử lý đường dẫn: $RAW_URL"
           
           # Dùng gdown --fuzzy để tự bóc tách link chia sẻ Google Drive và vượt trang cảnh báo >100MB
