@@ -1,7 +1,8 @@
 # File: .github/workflows/sidestore_ipa.yml
 # Chức năng:
-# 1. Lấy nguyên bản IPA tham khảo từ link Google Drive của bạn (Giữ nguyên UI và tính năng gốc của nó)
-# 2. Tiêm OllieAOV.dylib để tự động Bypass Key BaoNTQ + Chống Trận Ảo (Anti-Desync) + Chống Văng Game
+# - Đã gỡ bỏ hoàn toàn tham số --fuzzy gây lỗi trên Python 3.14
+# - Tải trực tiếp file IPA 423MB qua gdown ID chuẩn + dự phòng curl drive.usercontent.google.com
+# - Giữ nguyên Menu gốc của IPA tham khảo + Tiêm OllieAOV.dylib (Bypass Key BaoNTQ & Chống Trận Ảo)
 
 name: Bypass BaoNTQ Key & Fix Trận Ảo Cho SideStore
 
@@ -9,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: 'Link Google Drive file IPA tham khảo của bạn'
+        description: 'Dán link Google Drive file IPA tham khảo của bạn vào đây'
         required: true
-        default: 'https://drive.google.com/file/d/1pMZh-8ohmW_OzXJRPhBCprg_khxfTn8V/view?usp=sharing'
+        default: ''
 
 jobs:
   pack-ipa-for-sidestore:
@@ -24,17 +25,16 @@ jobs:
       - name: 2. Cài đặt công cụ (ldid, insert_dylib & gdown)
         run: |
           brew install ldid wget
-          python3 -m pip install --upgrade pip --break-system-packages || true
           python3 -m pip install --upgrade gdown --break-system-packages || pip3 install gdown
           
           git clone https://github.com/Tyilo/insert_dylib.git
           clang insert_dylib/insert_dylib/main.c -o /usr/local/bin/insert_dylib -framework Foundation
 
-      - name: 3. Tạo thư mục Header giả lập (Để không phải sửa cấu trúc kho)
+      - name: 3. Tạo thư mục Header giả lập
         run: |
           mkdir -p include imgui
-          echo "// No extra ImGui needed - using original IPA UI" > imgui/imgui.h
-          echo "// No extra Metal needed" > imgui/imgui_impl_metal.h
+          echo "// Header stub" > imgui/imgui.h
+          echo "// Metal stub" > imgui/imgui_impl_metal.h
 
       - name: 4. Biên dịch OllieAOV.dylib (Bypass Key BaoNTQ + Chống Trận Ảo)
         run: |
@@ -54,16 +54,30 @@ jobs:
           ldid -S OllieAOV.dylib
           ls -lh OllieAOV.dylib
 
-      - name: 5. Tải file IPA tham khảo từ Google Drive
+      - name: 5. Tải file IPA tham khảo từ Google Drive (Không dùng --fuzzy)
         run: |
           RAW_URL="${{ github.event.inputs.ipa_url }}"
+          # Tự động lọc lấy đúng chuỗi ID từ đường link Google Drive
           FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*\/d\/\([a-zA-Z0-9_-]*\).*/\1/p')
+          if [ -z "$FILE_ID" ]; then
+            FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/p')
+          fi
           if [ -z "$FILE_ID" ]; then
             FILE_ID="$RAW_URL"
           fi
           
-          python3 -m gdown "https://drive.google.com/uc?id=${FILE_ID}&export=download" -O BaseGame.ipa --fuzzy
+          echo "Đang tải file IPA từ Google Drive..."
+          # Cách 1: Gọi gdown trực tiếp bằng ID (Không có --fuzzy)
+          python3 -m gdown "$FILE_ID" -O BaseGame.ipa || true
+          
+          # Cách 2 (Dự phòng tự động nếu gdown bị chặn): Tải thẳng qua cổng usercontent mới của Google Drive
+          if [ ! -f "BaseGame.ipa" ] || [ $(stat -f%z "BaseGame.ipa") -lt 10000000 ]; then
+            echo "Chuyển sang tải trực tiếp qua cổng drive.usercontent.google.com..."
+            curl -L "https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t" -o BaseGame.ipa
+          fi
+          
           ls -lh BaseGame.ipa
+          file BaseGame.ipa
 
       - name: 6. Giữ nguyên Menu gốc của IPA + Tiêm Bypass Key BaoNTQ & Chống Trận Ảo
         run: |
@@ -74,34 +88,37 @@ jobs:
             APP_DIR=$(find build_ipa/Payload -name "*.app" -type d | head -n 1)
             mkdir -p "$APP_DIR/Frameworks"
             
-            echo "=== Danh sách Dylib gốc có sẵn trong IPA trên Drive ==="
+            echo "=== Danh sách Dylib gốc có sẵn trong IPA ==="
             ls -la "$APP_DIR/Frameworks" || true
             
-            # Đưa cục Bypass Key & Chống Trận Ảo vào cùng thư mục Frameworks
+            # Copy OllieAOV.dylib vào cả thư mục Frameworks lẫn thư mục gốc của .app để đảm bảo đường dẫn nào cũng nạp được
             cp OllieAOV.dylib "$APP_DIR/Frameworks/"
+            cp OllieAOV.dylib "$APP_DIR/"
             
             EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
             /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.garena.game.kgvn.sidestore" "$APP_DIR/Info.plist" || true
             /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$APP_DIR/Info.plist" || true
             
-            # Xóa PlugIns thừa để SideStore cài đặt không bị lỗi giới hạn App ID
+            # Xóa PlugIns phụ và chữ ký cũ gây xung đột với SideStore
             rm -rf "$APP_DIR/PlugIns" "$APP_DIR/Watch" "$APP_DIR/_CodeSignature" || true
             
-            # Tiêm OllieAOV.dylib vào binary chính để tự động kích hoạt VIP cho Dylib gốc
+            # Tiêm OllieAOV.dylib với cờ --weak để không bao giờ gây văng khi khởi động
             insert_dylib --all-yes --inplace --weak "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
             
-            # Ký đồng bộ toàn bộ Dylib gốc và mới để không bị văng khi vào trận
-            find "$APP_DIR/Frameworks" -name "*.dylib" -exec ldid -S {} \; || true
+            # Ký đồng bộ toàn bộ Dylib và Binary chính
+            find "$APP_DIR" -name "*.dylib" -exec ldid -S {} \; || true
             find "$APP_DIR/Frameworks" -name "*.framework" -exec ldid -S {} \; || true
             ldid -S "$APP_DIR/$EXEC_NAME"
           else
-            echo "LỖI: Hãy kiểm tra quyền chia sẻ công khai 'Bất kỳ ai có đường liên kết' của file trên Drive!"
+            echo "LỖI: File tải về không phải định dạng nén ZIP/IPA. Hãy bật chia sẻ 'Bất kỳ ai có đường liên kết' trên Google Drive!"
+            head -n 20 BaseGame.ipa
             exit 1
           fi
           
           cd build_ipa
           zip -qr ../Ollie_AOV_SideStore_Ready.ipa Payload
           cd ..
+          ls -lh Ollie_AOV_SideStore_Ready.ipa
 
       - name: 7. Xuất file IPA hoàn chỉnh cho SideStore
         uses: actions/upload-artifact@v4
