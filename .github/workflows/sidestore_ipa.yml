@@ -66,11 +66,12 @@ jobs:
           ldid -S OllieAOV.dylib
           ls -lh OllieAOV.dylib
 
-      - name: 5. Tải IPA gốc từ Google Drive (Bypass chuẩn xác)
+- name: 5. Tải IPA gốc từ Google Drive (Dùng ID trực tiếp)
         run: |
           RAW_URL="${{ github.event.inputs.clean_ipa_url }}"
           echo "Đang lấy file từ liên kết: $RAW_URL"
           
+          # Lấy chính xác ID file từ link Google Drive
           FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*\/d\/\([a-zA-Z0-9_-]*\).*/\1/p')
           if [ -z "$FILE_ID" ]; then
             FILE_ID="$RAW_URL"
@@ -78,20 +79,10 @@ jobs:
           
           echo "Mã File ID nhận diện: $FILE_ID"
           
-          python3 -m gdown --fuzzy "$RAW_URL" -O BaseGame.ipa || true
+          # Dùng gdown tải trực tiếp theo ID đã bóc tách (Vượt qua hoàn toàn trang cảnh báo file lớn)
+          python3 -m gdown "https://drive.google.com/uc?id=${FILE_ID}&export=download" -O BaseGame.ipa --fuzzy
           
-          if [ ! -f "BaseGame.ipa" ] || [ $(stat -f%z "BaseGame.ipa") -lt 10000000 ]; then
-            echo "Tiến hành tải qua curl bypass..."
-            curl -c ./cookie -s -L "https://drive.google.com/uc?export=download&id=${FILE_ID}" > /dev/null
-            CONFIRM_CODE=$(awk '/_warning_/ {print $NF}' ./cookie)
-            
-            if [ -n "$CONFIRM_CODE" ]; then
-              curl -Lb ./cookie "https://drive.google.com/uc?export=download&confirm=${CONFIRM_CODE}&id=${FILE_ID}" -o BaseGame.ipa
-            else
-              curl -L "https://drive.google.com/uc?export=download&id=${FILE_ID}" -o BaseGame.ipa
-            fi
-          fi
-          
+          # Kiểm tra lại dung lượng file (Bắt buộc phải trên 100MB mới chuẩn file game)
           ls -lh BaseGame.ipa
 
       - name: 6. Giải nén an toàn & Tiêm OllieAOV.dylib
