@@ -1,5 +1,5 @@
 # File: .github/workflows/sidestore_ipa.yml
-# Chức năng: Đóng gói toàn bộ hack Liên Quân cho SideStore tự động trên GitHub Actions
+# Chức năng: Tự động kéo IPA gốc từ Google Drive, biên dịch OllieAOV.dylib và đóng gói hoàn chỉnh cho SideStore
 
 name: Build Clean IPA For SideStore
 
@@ -66,12 +66,11 @@ jobs:
           ldid -S OllieAOV.dylib
           ls -lh OllieAOV.dylib
 
-- name: 5. Tải IPA gốc từ Google Drive (Dùng ID trực tiếp)
+      - name: 5. Tải IPA gốc từ Google Drive (Dùng ID trực tiếp)
         run: |
           RAW_URL="${{ github.event.inputs.clean_ipa_url }}"
           echo "Đang lấy file từ liên kết: $RAW_URL"
           
-          # Lấy chính xác ID file từ link Google Drive
           FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*\/d\/\([a-zA-Z0-9_-]*\).*/\1/p')
           if [ -z "$FILE_ID" ]; then
             FILE_ID="$RAW_URL"
@@ -79,10 +78,7 @@ jobs:
           
           echo "Mã File ID nhận diện: $FILE_ID"
           
-          # Dùng gdown tải trực tiếp theo ID đã bóc tách (Vượt qua hoàn toàn trang cảnh báo file lớn)
           python3 -m gdown "https://drive.google.com/uc?id=${FILE_ID}&export=download" -O BaseGame.ipa --fuzzy
-          
-          # Kiểm tra lại dung lượng file (Bắt buộc phải trên 100MB mới chuẩn file game)
           ls -lh BaseGame.ipa
 
       - name: 6. Giải nén an toàn & Tiêm OllieAOV.dylib
