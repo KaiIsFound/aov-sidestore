@@ -1,0 +1,39 @@
+name: Inspect original IPA launch baseline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-original:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the original IPA supplied for comparison
+        env:
+          DRIVE_FILE_ID: 1W_2TzbPm8Y3BscYf-5m5PwISDR0Z4koE
+        run: |
+          curl --fail --location --retry 3 --max-time 600 \
+            "https://drive.usercontent.google.com/download?id=${DRIVE_FILE_ID}&export=download&confirm=t" \
+            --output original-baseline.ipa
+
+      - name: Verify exact archive and inspect app metadata
+        run: |
+          python3 tools/inspect_ipa.py original-baseline.ipa \
+            --expected-sha256 8637f12b74a4f1ace8cca0ba84f6d3ef03a1893946a3d43d1d1052e40fb276e8 \
+            --output original-baseline-report.json
+
+      - name: Export unchanged baseline and diagnostic report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Original-IPA-Launch-Baseline
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+          path: |
+            original-baseline.ipa
+            original-baseline-report.json
