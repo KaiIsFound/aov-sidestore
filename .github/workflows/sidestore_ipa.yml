@@ -1,17 +1,17 @@
 # File: .github/workflows/sidestore_ipa.yml
 # Chức năng:
-# 1. Tự động vô hiệu hóa kiểm tra Key BaoNTQ trong IPA 423MB mà không gây văng game
-# 2. Nhúng OllieAOV.dylib (Zero-Crash Engine + Unlock All Skin + ESP Chấp Tố Cáo)
+# 1. Lấy nguyên bản IPA tham khảo từ link Google Drive của bạn (Giữ nguyên UI và tính năng gốc của nó)
+# 2. Tiêm OllieAOV.dylib để tự động Bypass Key BaoNTQ + Chống Trận Ảo (Anti-Desync) + Chống Văng Game
 
-name: Build Zero-Crash & No-Key IPA For SideStore
+name: Bypass BaoNTQ Key & Fix Trận Ảo Cho SideStore
 
 on:
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: 'Dán link Google Drive của file IPA 423MB hoặc IPA gốc vào đây'
+        description: 'Link Google Drive file IPA tham khảo của bạn'
         required: true
-        default: ''
+        default: 'https://drive.google.com/file/d/1pMZh-8ohmW_OzXJRPhBCprg_khxfTn8V/view?usp=sharing'
 
 jobs:
   pack-ipa-for-sidestore:
@@ -30,13 +30,13 @@ jobs:
           git clone https://github.com/Tyilo/insert_dylib.git
           clang insert_dylib/insert_dylib/main.c -o /usr/local/bin/insert_dylib -framework Foundation
 
-      - name: 3. Tải ImGui Metal
+      - name: 3. Tạo thư mục Header giả lập (Để không phải sửa cấu trúc kho)
         run: |
           mkdir -p include imgui
-          git clone --depth 1 https://github.com/ocornut/imgui.git imgui_src
-          cp imgui_src/*.h imgui_src/*.cpp imgui_src/backends/imgui_impl_metal.* imgui/
+          echo "// No extra ImGui needed - using original IPA UI" > imgui/imgui.h
+          echo "// No extra Metal needed" > imgui/imgui_impl_metal.h
 
-      - name: 4. Biên dịch OllieAOV.dylib (Bypass Key + Zero-Crash + Unlock All Skin)
+      - name: 4. Biên dịch OllieAOV.dylib (Bypass Key BaoNTQ + Chống Trận Ảo)
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           CLANG_BIN=$(xcrun --sdk iphoneos --find clang++)
@@ -47,15 +47,14 @@ jobs:
             -Wno-deprecated-declarations -Wno-unused-parameter \
             -I./include -I./imgui \
             OllieAOV.mm \
-            imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/imgui_impl_metal.mm \
-            -framework Foundation -framework UIKit -framework Metal -framework MetalKit -framework CoreGraphics \
+            -framework Foundation -framework UIKit -framework CoreGraphics \
             -install_name @executable_path/Frameworks/OllieAOV.dylib \
             -o OllieAOV.dylib
             
           ldid -S OllieAOV.dylib
           ls -lh OllieAOV.dylib
 
-      - name: 5. Tải file IPA từ Google Drive
+      - name: 5. Tải file IPA tham khảo từ Google Drive
         run: |
           RAW_URL="${{ github.event.inputs.ipa_url }}"
           FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*\/d\/\([a-zA-Z0-9_-]*\).*/\1/p')
@@ -66,7 +65,7 @@ jobs:
           python3 -m gdown "https://drive.google.com/uc?id=${FILE_ID}&export=download" -O BaseGame.ipa --fuzzy
           ls -lh BaseGame.ipa
 
-      - name: 6. Vô hiệu hóa Key Lock BaoNTQ, Chống xung đột văng game & Tiêm OllieAOV.dylib
+      - name: 6. Giữ nguyên Menu gốc của IPA + Tiêm Bypass Key BaoNTQ & Chống Trận Ảo
         run: |
           mkdir -p build_ipa
           
@@ -75,28 +74,28 @@ jobs:
             APP_DIR=$(find build_ipa/Payload -name "*.app" -type d | head -n 1)
             mkdir -p "$APP_DIR/Frameworks"
             
-            echo "=== Kiểm tra các Dylib có sẵn trong IPA ==="
+            echo "=== Danh sách Dylib gốc có sẵn trong IPA trên Drive ==="
             ls -la "$APP_DIR/Frameworks" || true
             
-            # Copy OllieAOV.dylib (chứa bộ Bypass NSURLSession + Chặn Popup Key + SafeRead) vào Frameworks
+            # Đưa cục Bypass Key & Chống Trận Ảo vào cùng thư mục Frameworks
             cp OllieAOV.dylib "$APP_DIR/Frameworks/"
             
             EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
             /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.garena.game.kgvn.sidestore" "$APP_DIR/Info.plist" || true
             /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$APP_DIR/Info.plist" || true
             
-            # Xóa các thư mục tiện ích phụ gây văng trên SideStore
+            # Xóa PlugIns thừa để SideStore cài đặt không bị lỗi giới hạn App ID
             rm -rf "$APP_DIR/PlugIns" "$APP_DIR/Watch" "$APP_DIR/_CodeSignature" || true
             
-            # Tiêm OllieAOV.dylib nạp ĐẦU TIÊN để chặn đứng bảng hỏi Key của các dylib khác
+            # Tiêm OllieAOV.dylib vào binary chính để tự động kích hoạt VIP cho Dylib gốc
             insert_dylib --all-yes --inplace --weak "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
             
-            # Ký đồng bộ quyền (Entitlements) cho toàn bộ Frameworks và Binary chính để chống văng lúc vào trận
+            # Ký đồng bộ toàn bộ Dylib gốc và mới để không bị văng khi vào trận
             find "$APP_DIR/Frameworks" -name "*.dylib" -exec ldid -S {} \; || true
             find "$APP_DIR/Frameworks" -name "*.framework" -exec ldid -S {} \; || true
             ldid -S "$APP_DIR/$EXEC_NAME"
           else
-            echo "LỖI: Hãy mở quyền chia sẻ công khai 'Bất kỳ ai có đường liên kết' cho file IPA trên Drive!"
+            echo "LỖI: Hãy kiểm tra quyền chia sẻ công khai 'Bất kỳ ai có đường liên kết' của file trên Drive!"
             exit 1
           fi
           
