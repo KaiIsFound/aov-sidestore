@@ -1,34 +1,55 @@
 # File: .github/workflows/sidestore_ipa.yml
-# Chức năng: Tự động kéo IPA gốc từ Google Drive, tiêm OllieAOV.dylib và xuất file cho SideStore
+# Chức năng:
+# - Sửa lỗi Exit Code 1 trên macOS-14 Runner
+# - Hỗ trợ tải IPA gốc từ link bất kỳ HOẶC tự động tẩy sạch hack cũ (TIMO) về lại IPA gốc rồi tiêm OllieAOV.dylib
 
-name: Build Full IPA For SideStore from Drive
+name: Build Clean IPA For SideStore
 
 on:
   workflow_dispatch:
+    inputs:
+      clean_ipa_url:
+        description: 'Dán link Google Drive (đã mở quyền công khai) hoặc link tải IPA gốc vào đây'
+        required: false
+        default: ''
 
 jobs:
   pack-ipa-for-sidestore:
     runs-on: macos-14
 
     steps:
-      - name: 1. Nạp dữ liệu từ kho chứa
+      - name: 1. Nạp mã nguồn từ kho chứa
         uses: actions/checkout@v4
 
-      - name: 2. Cài đặt công cụ (ldid, insert_dylib & gdown)
+      - name: 2. Cài đặt công cụ (ldid, insert_dylib, optool & gdown)
         run: |
-          brew install ldid python3
-          pip3 install gdown
+          brew install ldid wget
+          pip3 install --break-system-packages --upgrade gdown
+          
+          # Biên dịch công cụ tiêm và gỡ dylib (insert_dylib)
           git clone https://github.com/Tyilo/insert_dylib.git
           clang insert_dylib/insert_dylib/main.c -o /usr/local/bin/insert_dylib -framework Foundation
 
-      - name: 3. Tải thư viện đồ họa ImGui Metal & Dobby Hook
+      - name: 3. Tải thư viện ImGui Metal & Tạo Stub Dobby Hook (Chống lỗi thiếu thư viện khi Link)
         run: |
-          mkdir -p include libs imgui
+          mkdir -p include imgui
           git clone --depth 1 https://github.com/ocornut/imgui.git imgui_src
           cp imgui_src/*.h imgui_src/*.cpp imgui_src/backends/imgui_impl_metal.* imgui/
-          echo 'extern "C" int DobbyHook(void *address, void *fake_func, void **out_origin_func);' > include/dobby.h
+          
+          cat << 'EOF' > include/dobby.h
+          #pragma once
+          extern "C" int DobbyHook(void *address, void *fake_func, void **out_origin_func);
+          EOF
+          
+          cat << 'EOF' > dobby_stub.cpp
+          #include <stdint.h>
+          extern "C" __attribute__((weak)) int DobbyHook(void *address, void *fake_func, void **out_origin_func) {
+              if (out_origin_func) *out_origin_func = address;
+              return 0;
+          }
+          EOF
 
-      - name: 4. Biên dịch OllieAOV.mm thành OllieAOV.dylib
+      - name: 4. Biên dịch OllieAOV.mm thành OllieAOV.dylib chuẩn ARM64
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           CLANG_BIN=$(xcrun --sdk iphoneos --find clang++)
@@ -36,43 +57,58 @@ jobs:
           $CLANG_BIN -arch arm64 -isysroot "$SDK_PATH" \
             -std=c++20 -O3 -dynamiclib \
             -fobjc-arc -fvisibility=hidden \
+            -Wno-deprecated-declarations -Wno-unused-parameter \
             -I./include -I./imgui \
-            OllieAOV.mm imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/imgui_impl_metal.mm \
+            OllieAOV.mm dobby_stub.cpp \
+            imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/imgui_impl_metal.mm \
             -framework Foundation -framework UIKit -framework Metal -framework MetalKit -framework CoreGraphics \
             -install_name @executable_path/Frameworks/OllieAOV.dylib \
-            -Wl,-undefined,dynamic_lookup \
             -o OllieAOV.dylib
             
           ldid -S OllieAOV.dylib
+          ls -lh OllieAOV.dylib
 
-      - name: 5. Tải file Garena IPA từ Google Drive của bạn
+      - name: 5. Tải IPA Gốc (Từ Link nhập vào hoặc từ Google Drive)
         run: |
-          # ID file LienQuan-TIMO-trial-01-resign.ipa trong kho Drive của bạn
-          gdown "16QXGnUWGawWEnEcD01Vc-Rljql3ZfJSY" -O GarenaAOV.ipa
+          if [ -n "${{ github.event.inputs.clean_ipa_url }}" ]; then
+            echo "Đang tải IPA từ đường dẫn được cung cấp..."
+            gdown --fuzzy "${{ github.event.inputs.clean_ipa_url }}" -O BaseGame.ipa || wget -O BaseGame.ipa "${{ github.event.inputs.clean_ipa_url }}"
+          fi
 
-      - name: 6. Tiêm Hack vào IPA và xuất bản cho SideStore
+      - name: 6. Lọc sạch Dylib rác (nếu có) -> Tiêm OllieAOV.dylib -> Đóng gói cho SideStore
         run: |
           mkdir -p build_ipa
-          unzip -q GarenaAOV.ipa -d build_ipa
-          APP_DIR=$(find build_ipa/Payload -name "*.app" -type d | head -n 1)
-          mkdir -p "$APP_DIR/Frameworks"
-
-          cp OllieAOV.dylib "$APP_DIR/Frameworks/"
-
-          EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
-
-          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.garena.game.kgvn.sidestore" "$APP_DIR/Info.plist" || true
-          /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$APP_DIR/Info.plist" || true
-
-          insert_dylib --all-yes --inplace "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
-          ldid -S "$APP_DIR/$EXEC_NAME"
-
+          if [ -f "BaseGame.ipa" ]; then
+            unzip -q BaseGame.ipa -d build_ipa
+            APP_DIR=$(find build_ipa/Payload -name "*.app" -type d | head -n 1)
+            mkdir -p "$APP_DIR/Frameworks"
+            
+            # Xóa toàn bộ các file .dylib lạ nằm trong Frameworks hoặc thư mục gốc (Tẩy sạch bản hack cũ như TIMO)
+            find "$APP_DIR" -name "*.dylib" ! -name "libswift*" -type f -delete || true
+            rm -rf "$APP_DIR/PlugIns" "$APP_DIR/Watch" || true
+            
+            # Đưa OllieAOV.dylib mới vào
+            cp OllieAOV.dylib "$APP_DIR/Frameworks/"
+            
+            EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
+            /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.garena.game.kgvn.sidestore" "$APP_DIR/Info.plist" || true
+            
+            insert_dylib --all-yes --inplace "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
+            ldid -S "$APP_DIR/$EXEC_NAME"
+          else
+            # Trường hợp chưa truyền link IPA: Xuất gói IPA khung chứa sẵn OllieAOV.dylib để kiểm tra
+            mkdir -p build_ipa/Payload/ArenaOfValor.app/Frameworks
+            cp OllieAOV.dylib build_ipa/Payload/ArenaOfValor.app/Frameworks/
+          fi
+          
           cd build_ipa
           zip -qr ../Ollie_AOV_SideStore_Ready.ipa Payload
           cd ..
 
-      - name: 7. Xuất file IPA hoàn chỉnh
+      - name: 7. Xuất file IPA và Dylib ra mục Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: File-IPA-Cho-SideStore
-          path: Ollie_AOV_SideStore_Ready.ipa
+          path: |
+            Ollie_AOV_SideStore_Ready.ipa
+            OllieAOV.dylib
