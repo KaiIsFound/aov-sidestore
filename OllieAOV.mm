@@ -20,6 +20,10 @@
 #import <string>
 #import <cmath>
 #import <map>
+#include <cstring>
+#include <unistd.h>
+#include "OllieConfig.h"
+#import "OllieMenu.h"
 
 // Giả định sử dụng Dobby / CydiaSubstrate cho Hooking trên iOS (Hỗ trợ cả Jitless/Non-JB)
 extern "C" int DobbyHook(void *address, void *fake_func, void **out_origin_func);
@@ -65,35 +69,7 @@ namespace off {
 // ============================================================================
 struct Vector3 { float x, y, z; };
 
-struct CheatConfig {
-    // ESP
-    bool espMaster       = true;
-    bool espBox          = true;
-    bool espLine         = true;
-    bool espHealth       = true;
-    bool espSkillCD      = true;  // Hiện thời gian hồi chiêu 1, 2, 3 và Phép bổ trợ
-    bool espMinimap      = true;  // Vẽ avatar tướng địch trên Minimap
-    bool espJungleTimer  = true;  // Đếm ngược thời gian Bùa Xanh/Đỏ, Tà Thần, Rồng
-    bool hackMap         = true;  // Sáng bụi cỏ 100%
-
-    // Camera & Combat
-    float camHeightRate  = 1.65f; // Góc nhìn siêu rộng (1.0 = Gốc, 2.5 = Siêu cao)
-    bool  autoSmite      = true;  // Tự động Trừng Trị khi máu mục tiêu lớn <= sát thương chuẩn
-    bool  aimElsu        = true;  // Tự động dự đoán hướng di chuyển cho Viễn Trình Kích (Elsu)
-
-    // Mod Skin
-    bool  skinMaster     = true;
-    std::map<int, int> skinMap = {
-        {150, 11}, // Nakroth -> Thứ Nguyên Vệ Thần
-        {167, 12}, // Ngộ Không -> Tân Niên Võ Thần
-        {111, 15}, // Violet -> Thứ Nguyên Vệ Thần
-        {196, 8},  // Elsu -> Sứ Giả Tận Thế
-        {520, 7}   // Florentino -> Giám Sát Tinh Hệ
-    };
-
-    // Bảo mật
-    bool  streamProof    = true;  // Ẩn menu & ESP khi quay màn hình hoặc khi Garena chụp ảnh ngầm
-} cfg;
+CheatConfig cfg;
 
 uintptr_t g_UnityBase = 0;
 uintptr_t g_AnogsBase = 0;
@@ -188,6 +164,10 @@ void hook_SetVisible(void* instance, bool visible) {
 // Khởi tạo tự động khi Dylib được nạp vào tiến trình Liên Quân iOS
 __attribute__((constructor))
 static void InitializeOllieIOS() {
+    // UI startup must not wait for UnityFramework or anogs to load.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        StartOllieMenu();
+    });
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         while ((g_AnogsBase = GetMachOBase("anogs")) == 0) {
             usleep(50000);
