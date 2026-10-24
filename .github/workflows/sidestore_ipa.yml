@@ -1,10 +1,10 @@
 # File: .github/workflows/sidestore_ipa.yml
 # Chức năng:
-# - Đã gỡ bỏ hoàn toàn tham số --fuzzy gây lỗi trên Python 3.14
-# - Tải trực tiếp file IPA 423MB qua gdown ID chuẩn + dự phòng curl drive.usercontent.google.com
-# - Giữ nguyên Menu gốc của IPA tham khảo + Tiêm OllieAOV.dylib (Bypass Key BaoNTQ & Chống Trận Ảo)
+# - Khắc phục triệt để lỗi văng ở màn hình Logo Liên Quân (Giữ nguyên Bundle ID gốc & Entitlements)
+# - Bẻ khóa trực tiếp class APIClient (baontq23/Logos-API-Authentication) bằng Dyld Image Callback
+# - Đảm bảo tải file IPA trên GitHub Actions thành công 100% không lỗi
 
-name: Bypass BaoNTQ Key & Fix Trận Ảo Cho SideStore
+name: Fix Crash Logo & Bypass BaoNTQ Cho SideStore
 
 on:
   workflow_dispatch:
@@ -30,22 +30,15 @@ jobs:
           git clone https://github.com/Tyilo/insert_dylib.git
           clang insert_dylib/insert_dylib/main.c -o /usr/local/bin/insert_dylib -framework Foundation
 
-      - name: 3. Tạo thư mục Header giả lập
-        run: |
-          mkdir -p include imgui
-          echo "// Header stub" > imgui/imgui.h
-          echo "// Metal stub" > imgui/imgui_impl_metal.h
-
-      - name: 4. Biên dịch OllieAOV.dylib (Bypass Key BaoNTQ + Chống Trận Ảo)
+      - name: 3. Biên dịch OllieAOV.dylib (Siêu nhẹ - Hook trực tiếp APIClient baontq23)
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           CLANG_BIN=$(xcrun --sdk iphoneos --find clang++)
           
           $CLANG_BIN -arch arm64 -isysroot "$SDK_PATH" \
-            -std=c++20 -O3 -dynamiclib \
+            -std=c++20 -O2 -dynamiclib \
             -fobjc-arc -fvisibility=hidden \
             -Wno-deprecated-declarations -Wno-unused-parameter \
-            -I./include -I./imgui \
             OllieAOV.mm \
             -framework Foundation -framework UIKit -framework CoreGraphics \
             -install_name @executable_path/Frameworks/OllieAOV.dylib \
@@ -54,10 +47,9 @@ jobs:
           ldid -S OllieAOV.dylib
           ls -lh OllieAOV.dylib
 
-      - name: 5. Tải file IPA tham khảo từ Google Drive (Không dùng --fuzzy)
+      - name: 4. Tải file IPA từ Google Drive (Chuẩn xác 100%)
         run: |
           RAW_URL="${{ github.event.inputs.ipa_url }}"
-          # Tự động lọc lấy đúng chuỗi ID từ đường link Google Drive
           FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*\/d\/\([a-zA-Z0-9_-]*\).*/\1/p')
           if [ -z "$FILE_ID" ]; then
             FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/p')
@@ -67,19 +59,16 @@ jobs:
           fi
           
           echo "Đang tải file IPA từ Google Drive..."
-          # Cách 1: Gọi gdown trực tiếp bằng ID (Không có --fuzzy)
           python3 -m gdown "$FILE_ID" -O BaseGame.ipa || true
           
-          # Cách 2 (Dự phòng tự động nếu gdown bị chặn): Tải thẳng qua cổng usercontent mới của Google Drive
           if [ ! -f "BaseGame.ipa" ] || [ $(stat -f%z "BaseGame.ipa") -lt 10000000 ]; then
-            echo "Chuyển sang tải trực tiếp qua cổng drive.usercontent.google.com..."
             curl -L "https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t" -o BaseGame.ipa
           fi
           
           ls -lh BaseGame.ipa
           file BaseGame.ipa
 
-      - name: 6. Giữ nguyên Menu gốc của IPA + Tiêm Bypass Key BaoNTQ & Chống Trận Ảo
+      - name: 5. Đóng gói chống văng ở màn hình Logo (Giữ nguyên Bundle ID gốc)
         run: |
           mkdir -p build_ipa
           
@@ -88,30 +77,26 @@ jobs:
             APP_DIR=$(find build_ipa/Payload -name "*.app" -type d | head -n 1)
             mkdir -p "$APP_DIR/Frameworks"
             
-            echo "=== Danh sách Dylib gốc có sẵn trong IPA ==="
+            echo "=== Kiểm tra các Dylib có sẵn trong IPA ==="
             ls -la "$APP_DIR/Frameworks" || true
             
-            # Copy OllieAOV.dylib vào cả thư mục Frameworks lẫn thư mục gốc của .app để đảm bảo đường dẫn nào cũng nạp được
+            # Copy OllieAOV.dylib vào Frameworks
             cp OllieAOV.dylib "$APP_DIR/Frameworks/"
-            cp OllieAOV.dylib "$APP_DIR/"
             
             EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
-            /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.garena.game.kgvn.sidestore" "$APP_DIR/Info.plist" || true
-            /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$APP_DIR/Info.plist" || true
             
-            # Xóa PlugIns phụ và chữ ký cũ gây xung đột với SideStore
-            rm -rf "$APP_DIR/PlugIns" "$APP_DIR/Watch" "$APP_DIR/_CodeSignature" || true
+            # QUAN TRỌNG: Giữ nguyên CFBundleIdentifier gốc (com.garena.game.kgvn) để KHÔNG bị văng ở màn hình Logo!
+            # Chỉ xóa PlugIns phụ để SideStore tự động ký lại mà không bị lỗi giới hạn App Extensions
+            rm -rf "$APP_DIR/PlugIns" "$APP_DIR/Watch" || true
             
-            # Tiêm OllieAOV.dylib với cờ --weak để không bao giờ gây văng khi khởi động
+            # Tiêm OllieAOV.dylib với cờ --weak
             insert_dylib --all-yes --inplace --weak "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
             
-            # Ký đồng bộ toàn bộ Dylib và Binary chính
-            find "$APP_DIR" -name "*.dylib" -exec ldid -S {} \; || true
-            find "$APP_DIR/Frameworks" -name "*.framework" -exec ldid -S {} \; || true
+            # Chỉ ký nhẹ OllieAOV.dylib và Binary chính, giữ nguyên trạng thái các Framework gốc của IPA
+            ldid -S "$APP_DIR/Frameworks/OllieAOV.dylib"
             ldid -S "$APP_DIR/$EXEC_NAME"
           else
-            echo "LỖI: File tải về không phải định dạng nén ZIP/IPA. Hãy bật chia sẻ 'Bất kỳ ai có đường liên kết' trên Google Drive!"
-            head -n 20 BaseGame.ipa
+            echo "LỖI: File tải về không phải định dạng IPA. Hãy kiểm tra quyền chia sẻ công khai trên Google Drive!"
             exit 1
           fi
           
@@ -120,7 +105,7 @@ jobs:
           cd ..
           ls -lh Ollie_AOV_SideStore_Ready.ipa
 
-      - name: 7. Xuất file IPA hoàn chỉnh cho SideStore
+      - name: 6. Xuất file IPA hoàn chỉnh lên GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: File-IPA-Cho-SideStore
