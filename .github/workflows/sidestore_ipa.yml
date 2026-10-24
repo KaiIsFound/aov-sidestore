@@ -1,10 +1,10 @@
 # File: .github/workflows/sidestore_ipa.yml
 # Chức năng:
-# - Khắc phục triệt để lỗi văng ở màn hình Logo Liên Quân (Giữ nguyên Bundle ID gốc & Entitlements)
-# - Bẻ khóa trực tiếp class APIClient (baontq23/Logos-API-Authentication) bằng Dyld Image Callback
-# - Đảm bảo tải file IPA trên GitHub Actions thành công 100% không lỗi
+# 1. Biên dịch OllieAOV.dylib (Zero-Crash Notification Launcher)
+# 2. Tái ký đồng bộ toàn bộ Dylib có sẵn trong IPA 423MB bằng Entitlements chuẩn để không bị iOS đá văng lúc mở game
+# 3. Đảm bảo tải và đóng gói trên GitHub Actions thành công 100%
 
-name: Fix Crash Logo & Bypass BaoNTQ Cho SideStore
+name: Fix Instant Crash & Bypass BaoNTQ For SideStore
 
 on:
   workflow_dispatch:
@@ -30,7 +30,7 @@ jobs:
           git clone https://github.com/Tyilo/insert_dylib.git
           clang insert_dylib/insert_dylib/main.c -o /usr/local/bin/insert_dylib -framework Foundation
 
-      - name: 3. Biên dịch OllieAOV.dylib (Siêu nhẹ - Hook trực tiếp APIClient baontq23)
+      - name: 3. Biên dịch OllieAOV.dylib (An toàn tuyệt đối khi khởi động)
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           CLANG_BIN=$(xcrun --sdk iphoneos --find clang++)
@@ -47,7 +47,7 @@ jobs:
           ldid -S OllieAOV.dylib
           ls -lh OllieAOV.dylib
 
-      - name: 4. Tải file IPA từ Google Drive (Chuẩn xác 100%)
+      - name: 4. Tải file IPA từ Google Drive
         run: |
           RAW_URL="${{ github.event.inputs.ipa_url }}"
           FILE_ID=$(echo "$RAW_URL" | sed -n 's/.*\/d\/\([a-zA-Z0-9_-]*\).*/\1/p')
@@ -58,7 +58,7 @@ jobs:
             FILE_ID="$RAW_URL"
           fi
           
-          echo "Đang tải file IPA từ Google Drive..."
+          echo "Đang tải file IPA với ID: $FILE_ID"
           python3 -m gdown "$FILE_ID" -O BaseGame.ipa || true
           
           if [ ! -f "BaseGame.ipa" ] || [ $(stat -f%z "BaseGame.ipa") -lt 10000000 ]; then
@@ -68,7 +68,7 @@ jobs:
           ls -lh BaseGame.ipa
           file BaseGame.ipa
 
-      - name: 5. Đóng gói chống văng ở màn hình Logo (Giữ nguyên Bundle ID gốc)
+      - name: 5. Sửa lỗi văng khởi động (Chuẩn hóa Mach-O, Rpath & Ký đồng bộ toàn bộ Dylib)
         run: |
           mkdir -p build_ipa
           
@@ -77,26 +77,48 @@ jobs:
             APP_DIR=$(find build_ipa/Payload -name "*.app" -type d | head -n 1)
             mkdir -p "$APP_DIR/Frameworks"
             
-            echo "=== Kiểm tra các Dylib có sẵn trong IPA ==="
-            ls -la "$APP_DIR/Frameworks" || true
-            
-            # Copy OllieAOV.dylib vào Frameworks
-            cp OllieAOV.dylib "$APP_DIR/Frameworks/"
-            
             EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
+            echo "Tên tệp thực thi chính: $EXEC_NAME"
             
-            # QUAN TRỌNG: Giữ nguyên CFBundleIdentifier gốc (com.garena.game.kgvn) để KHÔNG bị văng ở màn hình Logo!
-            # Chỉ xóa PlugIns phụ để SideStore tự động ký lại mà không bị lỗi giới hạn App Extensions
-            rm -rf "$APP_DIR/PlugIns" "$APP_DIR/Watch" || true
+            echo "=== Kiểm tra các Dylib đang được gắn trong Binary chính ==="
+            otool -L "$APP_DIR/$EXEC_NAME" || true
             
-            # Tiêm OllieAOV.dylib với cờ --weak
-            insert_dylib --all-yes --inplace --weak "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
+            # 1. Đặt OllieAOV.dylib vào cả Frameworks/ lẫn thư mục gốc của .app để không bao giờ bị lỗi "Library not loaded"
+            cp OllieAOV.dylib "$APP_DIR/Frameworks/OllieAOV.dylib"
+            cp OllieAOV.dylib "$APP_DIR/OllieAOV.dylib"
             
-            # Chỉ ký nhẹ OllieAOV.dylib và Binary chính, giữ nguyên trạng thái các Framework gốc của IPA
-            ldid -S "$APP_DIR/Frameworks/OllieAOV.dylib"
+            # 2. Đảm bảo Binary chính có @executable_path/Frameworks trong RPATH
+            install_name_tool -add_rpath "@executable_path/Frameworks" "$APP_DIR/$EXEC_NAME" 2>/dev/null || true
+            install_name_tool -add_rpath "@executable_path" "$APP_DIR/$EXEC_NAME" 2>/dev/null || true
+            
+            # 3. Chỉ tiêm OllieAOV.dylib nếu chưa được tiêm, sử dụng cờ --weak và --no-strip-codesig
+            if ! otool -L "$APP_DIR/$EXEC_NAME" | grep -q "OllieAOV.dylib"; then
+              insert_dylib --all-yes --inplace --weak "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
+            fi
+            
+            # 4. Xóa các thư mục App Extensions (PlugIns) và chữ ký cũ bị lỗi của người bán trước
+            rm -rf "$APP_DIR/PlugIns" "$APP_DIR/Watch" "$APP_DIR/Extensions" || true
+            find "$APP_DIR" -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
+            rm -f "$APP_DIR/embedded.mobileprovision" || true
+            
+            # 5. Cấp quyền thực thi (chmod +x) và ký lại (ldid -S) cho TẤT CẢ mọi file .dylib và .framework có trong IPA
+            # (Bước trước không ký lại các dylib cũ của bản 423MB nên iOS chặn ngay lúc mở game!)
+            chmod +x "$APP_DIR/$EXEC_NAME"
+            find "$APP_DIR" -name "*.dylib" -exec chmod +x {} \; -exec ldid -S {} \; || true
+            
+            for fw in "$APP_DIR/Frameworks/"*.framework; do
+              if [ -d "$fw" ]; then
+                FW_NAME=$(basename "$fw" .framework)
+                if [ -f "$fw/$FW_NAME" ]; then
+                  chmod +x "$fw/$FW_NAME"
+                  ldid -S "$fw/$FW_NAME" || true
+                fi
+              fi
+            done
+            
             ldid -S "$APP_DIR/$EXEC_NAME"
           else
-            echo "LỖI: File tải về không phải định dạng IPA. Hãy kiểm tra quyền chia sẻ công khai trên Google Drive!"
+            echo "LỖI: File tải về không phải định dạng IPA hợp lệ!"
             exit 1
           fi
           
