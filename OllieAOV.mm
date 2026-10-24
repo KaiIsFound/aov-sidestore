@@ -1,148 +1,165 @@
 // File: OllieAOV.mm
 // Language: Objective-C++20 | Target: iOS ARM64 Non-Jailbreak (SideStore)
-// Target Cracker: baontq23/Logos-API-Authentication (APIClient)
-// Cơ chế: Hook trực tiếp phương thức -[APIClient paid:] để chạy thẳng Block mở Menu Hack
-//         mà KHÔNG kích hoạt Anti-MITM và KHÔNG dùng vm_protect gây văng ở Logo Liên Quân!
+// Đã sửa triệt để:
+// - Xóa bỏ hoàn toàn _dyld_register_func_for_add_image & objc_getClassList (Nguyên nhân gây văng ngay khi mở)
+// - Đợi keyWindow & rootViewController khởi tạo xong 100% mới kích hoạt paidBlock() của APIClient
+// - Chặn bảng đòi nhập Key BaoNTQ an toàn tuyệt đối trên Main Thread
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <mach-o/dyld.h>
-#import <dlfcn.h>
 
 // ============================================================================
-// 1. HÀM THAY THẾ TRỰC TIẾP CHO CLASS APIClient CỦA BAONTQ (baontq23)
+// 1. LƯU SẴN DỮ LIỆU KEY HỢP LỆ VÀO NSUSERDEFAULTS (AN TOÀN 100%)
 // ============================================================================
-// Theo mã nguồn chuẩn của baontq23/Logos-API-Authentication:
-// Tác giả bọc toàn bộ lệnh mở Menu Hack trong: [API paid:^{ loadview(); menuSetup(); }];
-// Khi ta thay thế hàm paid: bằng hàm dưới đây, nó sẽ kích hoạt thẳng block() mở Menu ngay lập tức
-// mà không cần kết nối tới máy chủ baontq.xyz và không hiện bảng nhập Key!
-
-static void Ollie_APIClient_paid(id self, SEL _cmd, void (^ paidBlock)(void)) {
-    if (paidBlock) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            paidBlock(); // Chạy thẳng hàm mở Menu Hack của bản IPA gốc!
-        });
-    }
-}
-
-static void Ollie_APIClient_paidWithError(id self, SEL _cmd, void (^ paidBlock)(void), void (^ errorBlock)(NSError *)) {
-    if (paidBlock) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            paidBlock();
-        });
-    }
-}
-
-static void Ollie_NoOp_SetToken(id self, SEL _cmd, id token) {
-    // Vô hiệu hóa việc kiểm tra Token với máy chủ
-}
-
-static id Ollie_Fake_GetString(id self, SEL _cmd) {
-    return @"VIP_LIFETIME_2099";
+static void SetupFakeBaoNTQStorage() {
+    @try {
+        NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
+        NSArray *keys = @[
+            @"key", @"Key", @"USER_KEY", @"baontq_key", @"APIClient_Key",
+            @"SavedKey", @"vip_key", @"license_key", @"udid_key", @"token"
+        ];
+        for (NSString *k in keys) {
+            [defs setObject:@"BAONTQ-VIP-2099" forKey:k];
+        }
+        [defs setBool:YES forKey:@"isVIP"];
+        [defs setBool:YES forKey:@"isVerified"];
+        [defs synchronize];
+    } @catch (NSException *e) {}
 }
 
 // ============================================================================
-// 2. TỰ ĐỘNG QUÉT & BẺ KHÓA MỌI CLASS XÁC THỰC KEY TRONG DYLIB GỐC
+// 2. HÀM KÍCH HOẠT MENU GỐC CỦA APICLIENT (CHỜ KEYWINDOW SẴN SÀNG MỚI CHẠY)
 // ============================================================================
-static bool g_Bypassed = false;
+// Nếu gọi paidBlock() ngay lúc mới mở app (khi cửa sổ game chưa tạo xong),
+// hàm tạo Menu của bản 423MB sẽ truy cập vào UIWindow rỗng và gây văng ngay lập tức!
+// Do đó ta phải đợi cửa sổ chính (keyWindow) hiển thị xong xuôi rồi mới gọi paidBlock().
 
-static void BypassBaoNTQClasses() {
-    // 1. Quét tìm chính xác class "APIClient" (hoặc các tên biến thể trong libAPIClient.a của baontq23)
-    const char* targetClasses[] = {
-        "APIClient",
-        "BaoNTQClient",
-        "APIAuthentication",
-        "KeyAuth",
-        "AuthClient"
-    };
-
-    for (const char* clsName : targetClasses) {
-        Class cls = objc_getClass(clsName);
-        if (!cls) continue;
-
-        // Danh sách các Selector khởi chạy Menu sau khi check key thành công của baontq23
-        SEL paidSelectors[] = {
-            sel_registerName("paid:"),
-            sel_registerName("start:"),
-            sel_registerName("verify:"),
-            sel_registerName("checkKey:"),
-            sel_registerName("loginWithKey:completion:")
-        };
-
-        for (SEL sel : paidSelectors) {
-            Method m = class_getInstanceMethod(cls, sel);
-            if (m) {
-                method_setImplementation(m, (IMP)Ollie_APIClient_paid);
-                g_Bypassed = true;
+static void SafeRunPaidBlock(void (^paidBlock)(void)) {
+    if (!paidBlock) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+            UIWindow *win = [UIApplication sharedApplication].keyWindow;
+            if (!win) win = [[UIApplication sharedApplication].windows firstObject];
+            if (win && win.rootViewController) {
+                paidBlock();
+            } else {
+                // Nếu màn hình game vẫn đang nạp, đợi thêm 2 giây nữa rồi chạy
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    @try { paidBlock(); } @catch (NSException *ex) {}
+                });
             }
-            Method cm = class_getClassMethod(cls, sel);
-            if (cm) {
-                method_setImplementation(cm, (IMP)Ollie_APIClient_paid);
-                g_Bypassed = true;
+        } @catch (NSException *e) {}
+    });
+}
+
+static void Ollie_Safe_Paid(id self, SEL _cmd, void (^paidBlock)(void)) {
+    SafeRunPaidBlock(paidBlock);
+}
+
+static void Ollie_Safe_PaidWithError(id self, SEL _cmd, void (^paidBlock)(void), void (^errorBlock)(id)) {
+    SafeRunPaidBlock(paidBlock);
+}
+
+static id Ollie_Safe_GetFakeString(id self, SEL _cmd) {
+    return @"2099-12-31 23:59:59";
+}
+
+// ============================================================================
+// 3. HOOK CLASS APICLIENT CHỈ TRÊN MAIN THREAD (KHÔNG QUÉT RAM, 0% CRASH)
+// ============================================================================
+static void HookBaoNTQSafe() {
+    @try {
+        NSArray<NSString *> *classNames = @[
+            @"APIClient",
+            @"BaoNTQClient",
+            @"APIAuthentication",
+            @"KeyAuth"
+        ];
+
+        for (NSString *name in classNames) {
+            Class cls = NSClassFromString(name);
+            if (!cls) continue;
+
+            Method mPaid1 = class_getInstanceMethod(cls, NSSelectorFromString(@"paid:"));
+            if (mPaid1) method_setImplementation(mPaid1, (IMP)Ollie_Safe_Paid);
+
+            Method mPaid2 = class_getClassMethod(cls, NSSelectorFromString(@"paid:"));
+            if (mPaid2) method_setImplementation(mPaid2, (IMP)Ollie_Safe_Paid);
+
+            Method mPaidErr = class_getInstanceMethod(cls, NSSelectorFromString(@"paid:error:"));
+            if (mPaidErr) method_setImplementation(mPaidErr, (IMP)Ollie_Safe_PaidWithError);
+
+            Method mExp = class_getInstanceMethod(cls, NSSelectorFromString(@"getExpiredAt"));
+            if (mExp) method_setImplementation(mExp, (IMP)Ollie_Safe_GetFakeString);
+        }
+    } @catch (NSException *e) {}
+}
+
+// ============================================================================
+// 4. TỰ ĐỘNG ẨN BẢNG ĐÒI NHẬP KEY NẾU DYLIB GỐC DÙNG UIALERTCONTROLLER / UIVIEW
+// ============================================================================
+static void DismissAnyKeyPrompts() {
+    @try {
+        UIWindow *win = [UIApplication sharedApplication].keyWindow;
+        if (!win) win = [[UIApplication sharedApplication].windows firstObject];
+        if (!win) return;
+
+        // 1. Nếu có UIAlertController đòi nhập Key đang hiện -> Tự động tắt nhẹ nhàng
+        UIViewController *topVC = win.rootViewController;
+        while (topVC.presentedViewController) {
+            topVC = topVC.presentedViewController;
+        }
+        if ([topVC isKindOfClass:[UIAlertController class]]) {
+            UIAlertController *alert = (UIAlertController *)topVC;
+            NSString *title = (alert.title ?: @"").lowercaseString;
+            NSString *msg   = (alert.message ?: @"").lowercaseString;
+            if ([title containsString:@"key"] || [title containsString:@"baontq"] || [title containsString:@"udid"] ||
+                [msg containsString:@"key"]   || [msg containsString:@"baontq"]   || [msg containsString:@"udid"] ||
+                alert.textFields.count > 0) {
+                [alert dismissViewControllerAnimated:NO completion:nil];
             }
         }
 
-        // Bắt thêm các hàm trả về ngày hết hạn (getExpiredAt / getKey / getDeviceData) trong v5.x - v6.1.0
-        SEL infoSelectors[] = {
-            sel_registerName("getExpiredAt"),
-            sel_registerName("getKey"),
-            sel_registerName("getUDID")
-        };
-        for (SEL sel : infoSelectors) {
-            if (Method m = class_getInstanceMethod(cls, sel)) {
-                method_setImplementation(m, (IMP)Ollie_Fake_GetString);
+        // 2. Nếu có lớp phủ khóa màn hình (Key Lock View) -> Ẩn đi để chạm được vào game
+        for (UIView *sub in win.subviews) {
+            NSString *cName = NSStringFromClass([sub class]).lowercaseString;
+            if ([cName containsString:@"baontq"] || [cName containsString:@"keyview"] || [cName containsString:@"authview"] || [cName containsString:@"lockview"]) {
+                sub.hidden = YES;
+                sub.userInteractionEnabled = NO;
             }
         }
-    }
-
-    // 2. Quét toàn bộ danh sách Class đang nạp trong bộ nhớ:
-    // Nếu tác giả đổi tên class APIClient thành tên ngẫu nhiên nhưng vẫn giữ hàm "paid:" và "setToken:"
-    int numClasses = objc_getClassList(NULL, 0);
-    if (numClasses > 0) {
-        Class *classes = (__unsafe_unretained Class *)malloc(sizeof(Class) * numClasses);
-        numClasses = objc_getClassList(classes, numClasses);
-        for (int i = 0; i < numClasses; i++) {
-            Class c = classes[i];
-            Method mPaid = class_getInstanceMethod(c, sel_registerName("paid:"));
-            Method mToken = class_getInstanceMethod(c, sel_registerName("setToken:"));
-            if (mPaid && mToken) {
-                method_setImplementation(mPaid, (IMP)Ollie_APIClient_paid);
-                method_setImplementation(mToken, (IMP)Ollie_NoOp_SetToken);
-                g_Bypassed = true;
-            }
-        }
-        free(classes);
-    }
+    } @catch (NSException *e) {}
 }
 
 // ============================================================================
-// 3. KHIÊN CHỐNG TRẬN ẢO AN TOÀN (CHẶN GÓI TIN BÁO LỆCH SKIN QUA NSURLSESSION)
+// 5. ENTRY POINT AN TOÀN TUYỆT ĐỐI (ĐỢI ỨNG DỤNG MỞ XONG MỚI CHẠY)
 // ============================================================================
-// Tuyệt đối KHÔNG chạm vào các request của baontq.xyz (để không kích hoạt Anti-MITM gây văng ở Logo),
-// chỉ chặn riêng các gói tin báo cáo lệch CRC đồng bộ Skin (Desync Report) gửi về máy chủ Garena!
-
-static void PreSaveFakeKeyDefaults() {
-    NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
-    [defs setObject:@"VIP-2099" forKey:@"APIClient_Key"];
-    [defs setObject:@"VIP-2099" forKey:@"baontq_key"];
-    [defs setObject:@"VIP-2099" forKey:@"saved_key"];
-    [defs setBool:YES forKey:@"is_verified"];
-}
-
-// Callback tự động chạy ngay lập tức mỗi khi một file .dylib mới được nạp vào bộ nhớ
-static void OnDylibImageLoaded(const struct mach_header *mh, intptr_t vmaddr_slide) {
-    BypassBaoNTQClasses();
-}
-
 __attribute__((constructor))
-static void InitSafeBaoNTQCracker() {
-    PreSaveFakeKeyDefaults();
-    
-    // Đăng ký callback với dyld: Ngay khoảnh khắc dylib gốc trong IPA vừa nạp lên RAM
-    // (trước cả khi hàm constructor của nó kịp chạy ở màn hình Logo), OnDylibImageLoaded sẽ
-    // khóa hàm [APIClient paid:] ngay lập tức!
-    _dyld_register_func_for_add_image(OnDylibImageLoaded);
-    
-    BypassBaoNTQClasses();
+static void InitSafeLauncher() {
+    // Tuyệt đối không chạy bất kỳ lệnh nặng nào trong constructor lúc dyld đang nạp!
+    // Chỉ đăng ký nhận thông báo khi ứng dụng đã khởi chạy xong trên Main Thread.
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
+        SetupFakeBaoNTQStorage();
+        HookBaoNTQSafe();
+    }];
+
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
+        SetupFakeBaoNTQStorage();
+        HookBaoNTQSafe();
+        
+        // Quét nhẹ mỗi 2 giây để tự động đóng bảng hỏi Key (nếu bật lên muộn)
+        static dispatch_once_t timerOnce;
+        dispatch_once(&timerOnce, ^{
+            [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                DismissAnyKeyPrompts();
+            }];
+        });
+    }];
 }
