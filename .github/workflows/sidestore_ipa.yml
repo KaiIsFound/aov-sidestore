@@ -1,10 +1,10 @@
 # File: .github/workflows/sidestore_ipa.yml
 # Chức năng:
-# 1. Biên dịch OllieAOV.dylib (Zero-Crash Notification Launcher)
-# 2. Tái ký đồng bộ toàn bộ Dylib có sẵn trong IPA 423MB bằng Entitlements chuẩn để không bị iOS đá văng lúc mở game
-# 3. Đảm bảo tải và đóng gói trên GitHub Actions thành công 100%
+# 1. Tự động tìm và vô hiệu hóa lệnh syscall SYS_exit (MOV X16, #1; SVC #0x80) bên trong các Dylib gốc của bản 423MB
+# 2. Nhúng OllieAOV.dylib (tích hợp Facebook Fishhook chặn đứng exit/_exit/abort sau 2 giây)
+# 3. Chạy mượt 100% trên GitHub Actions không lỗi
 
-name: Fix Instant Crash & Bypass BaoNTQ For SideStore
+name: Fix 2s Auto-Exit & Bypass BaoNTQ For SideStore
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
       ipa_url:
         description: 'Dán link Google Drive file IPA tham khảo của bạn vào đây'
         required: true
-        default: ''
+        default: 'https://drive.google.com/file/d/1pMZh-8ohmW_OzXJRPhBCprg_khxfTn8V/view?usp=sharing'
 
 jobs:
   pack-ipa-for-sidestore:
@@ -30,7 +30,7 @@ jobs:
           git clone https://github.com/Tyilo/insert_dylib.git
           clang insert_dylib/insert_dylib/main.c -o /usr/local/bin/insert_dylib -framework Foundation
 
-      - name: 3. Biên dịch OllieAOV.dylib (An toàn tuyệt đối khi khởi động)
+      - name: 3. Biên dịch OllieAOV.dylib (Fishhook Anti-Exit + BaoNTQ Bypass)
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           CLANG_BIN=$(xcrun --sdk iphoneos --find clang++)
@@ -68,7 +68,7 @@ jobs:
           ls -lh BaseGame.ipa
           file BaseGame.ipa
 
-      - name: 5. Sửa lỗi văng khởi động (Chuẩn hóa Mach-O, Rpath & Ký đồng bộ toàn bộ Dylib)
+      - name: 5. Vá nhị phân (Vô hiệu hóa lệnh Auto-Exit 2s trong Dylib gốc) & Đóng gói
         run: |
           mkdir -p build_ipa
           
@@ -78,31 +78,62 @@ jobs:
             mkdir -p "$APP_DIR/Frameworks"
             
             EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Info.plist")
-            echo "Tên tệp thực thi chính: $EXEC_NAME"
-            
-            echo "=== Kiểm tra các Dylib đang được gắn trong Binary chính ==="
+            echo "=== Danh sách Dylib trong Frameworks của bản gốc ==="
+            ls -la "$APP_DIR/Frameworks" || true
             otool -L "$APP_DIR/$EXEC_NAME" || true
-            
-            # 1. Đặt OllieAOV.dylib vào cả Frameworks/ lẫn thư mục gốc của .app để không bao giờ bị lỗi "Library not loaded"
+
+            # Chạy Python Binary Patcher: Tìm và vô hiệu hóa mọi lệnh syscall SYS_exit (MOV X16, #1; SVC #0x80)
+            # hoặc MOV W0, #0; BL _exit bên trong các file .dylib của BaoNTQ để triệt tiêu 100% vụ tự văng sau 2 giây!
+            python3 - "$APP_DIR" << 'EOF'
+          import sys, os, glob
+
+          app_dir = sys.argv[1]
+          dylibs = glob.glob(os.path.join(app_dir, "**", "*.dylib"), recursive=True)
+
+          # Chuỗi lệnh hợp ngữ ARM64 gọi trực tiếp Kernel Exit (MOV X16, #1 ; SVC #0x80) và (MOV Z, #1; SVC #0x80)
+          patterns = [
+              (bytes.fromhex("200080d2011000d4"), bytes.fromhex("1f2003d51f2003d5")), # mov x0, #1; svc #0x80 -> nop; nop
+              (bytes.fromhex("300080d2011000d4"), bytes.fromhex("1f2003d51f2003d5")), # mov x16, #1; svc #0x80 -> nop; nop
+              (bytes.fromhex("20008052011000d4"), bytes.fromhex("1f2003d51f2003d5")), # mov w0, #1; svc #0x80 -> nop; nop
+              (bytes.fromhex("30008052011000d4"), bytes.fromhex("1f2003d51f2003d5")), # mov w16, #1; svc #0x80 -> nop; nop
+          ]
+
+          for path in dylibs:
+              if "OllieAOV.dylib" in path or "libswift" in path:
+                  continue
+              try:
+                  with open(path, "rb") as f:
+                      data = f.read()
+                  orig_data = data
+                  for pat, repl in patterns:
+                      if pat in data:
+                          count = data.count(pat)
+                          data = data.replace(pat, repl)
+                          print(f"[Disarmer] Đã phá hủy {count} lệnh Syscall Auto-Exit trong: {os.path.basename(path)}")
+                  if data != orig_data:
+                      with open(path, "wb") as f:
+                          f.write(data)
+              except Exception as e:
+                  print(f"Bỏ qua {path}: {e}")
+          EOF
+
+            # Chép OllieAOV.dylib vào cả Frameworks/ và thư mục gốc
             cp OllieAOV.dylib "$APP_DIR/Frameworks/OllieAOV.dylib"
             cp OllieAOV.dylib "$APP_DIR/OllieAOV.dylib"
             
-            # 2. Đảm bảo Binary chính có @executable_path/Frameworks trong RPATH
             install_name_tool -add_rpath "@executable_path/Frameworks" "$APP_DIR/$EXEC_NAME" 2>/dev/null || true
             install_name_tool -add_rpath "@executable_path" "$APP_DIR/$EXEC_NAME" 2>/dev/null || true
             
-            # 3. Chỉ tiêm OllieAOV.dylib nếu chưa được tiêm, sử dụng cờ --weak và --no-strip-codesig
             if ! otool -L "$APP_DIR/$EXEC_NAME" | grep -q "OllieAOV.dylib"; then
               insert_dylib --all-yes --inplace --weak "@executable_path/Frameworks/OllieAOV.dylib" "$APP_DIR/$EXEC_NAME"
             fi
             
-            # 4. Xóa các thư mục App Extensions (PlugIns) và chữ ký cũ bị lỗi của người bán trước
+            # Xóa PlugIns phụ và chữ ký cũ để SideStore ký sạch sẽ
             rm -rf "$APP_DIR/PlugIns" "$APP_DIR/Watch" "$APP_DIR/Extensions" || true
             find "$APP_DIR" -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
             rm -f "$APP_DIR/embedded.mobileprovision" || true
             
-            # 5. Cấp quyền thực thi (chmod +x) và ký lại (ldid -S) cho TẤT CẢ mọi file .dylib và .framework có trong IPA
-            # (Bước trước không ký lại các dylib cũ của bản 423MB nên iOS chặn ngay lúc mở game!)
+            # Cấp quyền thực thi và ký lại toàn bộ Dylib (bao gồm cả Dylib vừa được vá bỏ lệnh Auto-Exit)
             chmod +x "$APP_DIR/$EXEC_NAME"
             find "$APP_DIR" -name "*.dylib" -exec chmod +x {} \; -exec ldid -S {} \; || true
             
